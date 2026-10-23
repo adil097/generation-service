@@ -2,7 +2,9 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from generation_service.db.transactions import TransactionRunner
 
 
 @asynccontextmanager
@@ -16,6 +18,7 @@ async def database_lifespan(app: FastAPI) -> AsyncIterator[None]:
         connect_args={"timeout": 3},
     )
     app.state.engine = engine
+    app.state.transactions = TransactionRunner(async_sessionmaker(engine, expire_on_commit=False))
     try:
         yield
     finally:

@@ -8,6 +8,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
 from generation_service.config import DatabaseSettings
+from generation_service.db.locking import lock_user
 from generation_service.db.models import LedgerEntry, User
 
 DEMO_USERS = ((1, 100), (2, 50))
@@ -18,6 +19,7 @@ async def seed_demo(connection: AsyncConnection) -> None:
         await connection.execute(
             insert(User).values(id=user_id).on_conflict_do_nothing()
         )
+        await lock_user(connection, user_id)
         payment_id = f"demo:initial:user:{user_id}"
         await connection.execute(
             insert(LedgerEntry)
