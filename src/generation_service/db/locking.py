@@ -18,14 +18,21 @@ class LockedTask:
     status: str
 
 
-async def lock_user(transaction: Transaction, user_id: int) -> None:
+async def lock_user(
+    transaction: Transaction, user_id: int, *, skip_locked: bool = False
+) -> bool:
     if not transaction.in_transaction():
         raise RuntimeError("An outer transaction is required")
     found = await transaction.scalar(
-        select(User.id).where(User.id == user_id).with_for_update()
+        select(User.id)
+        .where(User.id == user_id)
+        .with_for_update(skip_locked=skip_locked)
     )
     if found is None:
+        if skip_locked:
+            return False
         raise UserNotFound(user_id)
+    return True
 
 
 async def lock_task(transaction: Transaction, task_id: UUID) -> LockedTask:

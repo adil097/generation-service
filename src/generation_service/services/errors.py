@@ -6,6 +6,14 @@ class TaskNotFound(LookupError):
     pass
 
 
+class AttemptNotFound(LookupError):
+    pass
+
+
+class InvalidAttemptEvent(ValueError):
+    """The event cannot be correlated with the specified provider attempt."""
+
+
 class ModelNotFound(LookupError):
     pass
 

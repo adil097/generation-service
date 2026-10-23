@@ -345,7 +345,9 @@ async def test_terminal_task_frees_active_slot(context, status):
             .values(
                 status=status,
                 error_type="technical" if status == "failed" else None,
-                finished_at=sa.func.clock_timestamp(),
+                finished_at=sa.func.greatest(
+                    sa.func.clock_timestamp(), GenerationAttempt.created_at
+                ),
             )
         )
         await session.execute(
@@ -356,7 +358,9 @@ async def test_terminal_task_frees_active_slot(context, status):
                 result_url="https://files.test/result"
                 if status == "completed"
                 else None,
-                finished_at=sa.func.clock_timestamp(),
+                finished_at=sa.func.greatest(
+                    sa.func.clock_timestamp(), GenerationTask.created_at
+                ),
             )
         )
         if status == "failed":

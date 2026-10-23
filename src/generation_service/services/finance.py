@@ -110,6 +110,21 @@ def _check_task_entry(entry: LedgerRecord, user_id: int, amount: int) -> None:
         )
 
 
+async def check_active_task_finances(
+    transaction: Transaction,
+    task_id: UUID,
+    user_id: int,
+    price_tokens: int,
+) -> None:
+    """Validate the financial basis before applying a result to an active task."""
+    debit = await _task_entry(transaction, task_id, "generation_debit")
+    if debit is None:
+        raise LedgerIntegrityError("Active task has no debit")
+    _check_task_entry(debit, user_id, -price_tokens)
+    if await _task_entry(transaction, task_id, "generation_refund") is not None:
+        raise LedgerIntegrityError("Active task already has a refund")
+
+
 async def credit_payment(
     transaction: Transaction, event: PaymentEvent
 ) -> LedgerMutation:
