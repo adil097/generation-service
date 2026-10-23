@@ -1,0 +1,86 @@
+name: task-job
+
+x-database-url: &database-url postgresql+asyncpg://${POSTGRES_USER:-generation}:${POSTGRES_PASSWORD:-local-development}@db:5432/${POSTGRES_DB:-generation}
+
+x-app: &app
+  build:
+    context: .
+    target: runtime
+  init: true
+  restart: unless-stopped
+  depends_on:
+    db:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=4).close()"]
+    interval: 5s
+    timeout: 5s
+    start_period: 15s
+    retries: 5
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-generation}
+      POSTGRES_USER: ${POSTGRES_USER:-generation}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-development}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 3s
+      start_period: 10s
+      retries: 10
+
+  api:
+    <<: *app
+    environment:
+      DATABASE_URL: *database-url
+      ALPHA_URL: http://alpha:8000
+      BETA_URL: http://beta:8000
+      ALPHA_WEBHOOK_SECRET: ${ALPHA_WEBHOOK_SECRET:-local-alpha-secret}
+      BETA_WEBHOOK_SECRET: ${BETA_WEBHOOK_SECRET:-local-beta-secret}
+      PAYMENTS_WEBHOOK_SECRET: ${PAYMENTS_WEBHOOK_SECRET:-local-payments-secret}
+      HTTP_TIMEOUT: ${HTTP_TIMEOUT:-5}
+      DISPATCH_LEASE: ${DISPATCH_LEASE:-15}
+      PROVIDER_TIMEOUT: ${PROVIDER_TIMEOUT:-60}
+      POLL_INTERVAL: ${POLL_INTERVAL:-1}
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+    command: ["uvicorn", "generation_service.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
+
+  alpha:
+    <<: *app
+    environment:
+      DATABASE_URL: *database-url
+      PROVIDER_NAME: alpha
+      PROVIDER_WEBHOOK_SECRET: ${ALPHA_WEBHOOK_SECRET:-local-alpha-secret}
+    command: ["uvicorn", "fake_providers.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+  beta:
+    <<: *app
+    environment:
+      DATABASE_URL: *database-url
+      PROVIDER_NAME: beta
+      PROVIDER_WEBHOOK_SECRET: ${BETA_WEBHOOK_SECRET:-local-beta-secret}
+    command: ["uvicorn", "fake_providers.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+  tests:
+    profiles: ["test"]
+    image: task-job-tests:local
+    build:
+      context: .
+      target: test
+    environment:
+      TEST_DATABASE_URL: *database-url
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
