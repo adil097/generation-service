@@ -1,1 +1,1 @@
-"""Database connectivity; schema and migrations follow in stage 3."""
+"""PostgreSQL models, provisioning and runtime connectivity."""

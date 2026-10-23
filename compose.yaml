@@ -1,6 +1,9 @@
 name: task-job
 
-x-database-url: &database-url postgresql+asyncpg://${POSTGRES_USER:-generation}:${POSTGRES_PASSWORD:-local-development}@db:5432/${POSTGRES_DB:-generation}
+x-admin-url: &admin-url postgresql+asyncpg://${POSTGRES_USER:-generation}:${POSTGRES_PASSWORD:-local-development}@db:5432/${POSTGRES_DB:-generation}
+x-migration-url: &migration-url postgresql+asyncpg://generation_migrator:${MIGRATION_DATABASE_PASSWORD:-local-migration-password}@db:5432/${POSTGRES_DB:-generation}
+x-database-url: &database-url postgresql+asyncpg://generation_app:${APP_DATABASE_PASSWORD:-local-app-password}@db:5432/${POSTGRES_DB:-generation}
+x-provider-url: &provider-url postgresql+asyncpg://generation_provider:${PROVIDER_DATABASE_PASSWORD:-local-provider-password}@db:5432/${POSTGRES_DB:-generation}
 
 x-app: &app
   build:
@@ -9,8 +12,8 @@ x-app: &app
   init: true
   restart: unless-stopped
   depends_on:
-    db:
-      condition: service_healthy
+    migrate:
+      condition: service_completed_successfully
   healthcheck:
     test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=4).close()"]
     interval: 5s
@@ -57,7 +60,7 @@ services:
   alpha:
     <<: *app
     environment:
-      DATABASE_URL: *database-url
+      DATABASE_URL: *provider-url
       PROVIDER_NAME: alpha
       PROVIDER_WEBHOOK_SECRET: ${ALPHA_WEBHOOK_SECRET:-local-alpha-secret}
     command: ["uvicorn", "fake_providers.main:app", "--host", "0.0.0.0", "--port", "8000"]
@@ -65,10 +68,47 @@ services:
   beta:
     <<: *app
     environment:
-      DATABASE_URL: *database-url
+      DATABASE_URL: *provider-url
       PROVIDER_NAME: beta
       PROVIDER_WEBHOOK_SECRET: ${BETA_WEBHOOK_SECRET:-local-beta-secret}
     command: ["uvicorn", "fake_providers.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+  db-bootstrap:
+    build:
+      context: .
+      target: runtime
+    environment:
+      DATABASE_URL: *admin-url
+      MIGRATION_DATABASE_PASSWORD: ${MIGRATION_DATABASE_PASSWORD:-local-migration-password}
+      APP_DATABASE_PASSWORD: ${APP_DATABASE_PASSWORD:-local-app-password}
+      PROVIDER_DATABASE_PASSWORD: ${PROVIDER_DATABASE_PASSWORD:-local-provider-password}
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["python", "-m", "generation_service.db.bootstrap"]
+
+  migrate:
+    build:
+      context: .
+      target: runtime
+    environment:
+      DATABASE_URL: *migration-url
+    depends_on:
+      db-bootstrap:
+        condition: service_completed_successfully
+    command: ["alembic", "upgrade", "head"]
+
+  seed:
+    profiles: ["tools"]
+    build:
+      context: .
+      target: runtime
+    environment:
+      DATABASE_URL: *database-url
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: ["python", "-m", "generation_service.db.seed"]
 
   tests:
     profiles: ["test"]
@@ -78,9 +118,12 @@ services:
       target: test
     environment:
       TEST_DATABASE_URL: *database-url
+      TEST_ADMIN_DATABASE_URL: *admin-url
+      TEST_MIGRATION_DATABASE_URL: *migration-url
+      TEST_PROVIDER_DATABASE_URL: *provider-url
     depends_on:
-      db:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
 volumes:
   postgres_data:
