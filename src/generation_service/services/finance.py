@@ -80,6 +80,12 @@ async def _balance_value(transaction: Transaction, user_id: int) -> int:
     return value
 
 
+async def ensure_funds(transaction: Transaction, user_id: int, tokens: int) -> None:
+    """Check funds in a fresh statement after the caller has locked the user."""
+    if await _balance_value(transaction, user_id) < tokens:
+        raise InsufficientFunds(user_id)
+
+
 async def _task_entry(
     transaction: Transaction, task_id: UUID, kind: LedgerKind
 ) -> LedgerRecord | None:
@@ -155,8 +161,7 @@ async def debit_generation(transaction: Transaction, task_id: UUID) -> LedgerMut
     if task.status not in {"queued", "processing"}:
         raise InvalidTaskState("A new debit requires an active task")
     # Read the balance in a new statement after waiting for the user's row lock.
-    if await _balance_value(transaction, task.user_id) < task.price_tokens:
-        raise InsufficientFunds(task.user_id)
+    await ensure_funds(transaction, task.user_id, task.price_tokens)
     row = (
         (
             await transaction.execute(

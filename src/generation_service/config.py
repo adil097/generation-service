@@ -1,10 +1,11 @@
 """Validated configuration shared by all worker processes."""
 
 from functools import lru_cache
-from typing import Self
+from typing import Annotated, Self
 
 from pydantic import (
     AnyHttpUrl,
+    AfterValidator,
     Field,
     PositiveFloat,
     PostgresDsn,
@@ -13,6 +14,15 @@ from pydantic import (
     model_validator,
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _validate_callback_base(value: AnyHttpUrl) -> AnyHttpUrl:
+    if value.query is not None or value.fragment is not None:
+        raise ValueError("Callback base URL must not contain a query or fragment")
+    return value
+
+
+CallbackBaseUrl = Annotated[AnyHttpUrl, AfterValidator(_validate_callback_base)]
 
 
 class DatabaseSettings(BaseSettings):
@@ -36,6 +46,7 @@ class DatabaseSettings(BaseSettings):
 
 
 class Settings(DatabaseSettings):
+    callback_base_url: CallbackBaseUrl = AnyHttpUrl("http://api:8000")
     alpha_url: AnyHttpUrl = AnyHttpUrl("http://alpha:8000")
     beta_url: AnyHttpUrl = AnyHttpUrl("http://beta:8000")
     alpha_webhook_secret: SecretStr = Field(min_length=1)
