@@ -76,3 +76,65 @@ SQL до COMMIT либо после успешного COMMIT до отправ�
 фиксации транзакции, также без очистки. Истечение сроков моделируется изменением
 только временных отметок в изолированной тестовой БД: проверки не ждут 60 секунд
 и не зависят от выбора случайной задержки провайдера.
+
+## Проверка чистого запуска
+
+Проверка этапа 11 использует отдельное имя Compose-проекта, новые порты и новый
+том PostgreSQL. Перед запуском убедитесь, что выбранное имя ещё не используется:
+
+```powershell
+docker ps -a --filter label=com.docker.compose.project=task-job-clean
+docker volume ls --filter label=com.docker.compose.project=task-job-clean
+Copy-Item .env.example .env.clean-check
+```
+
+Оба списка должны быть пустыми; иначе выберите другое имя во всех командах.
+В `.env.clean-check` измените `API_PORT=18000`, `POSTGRES_PORT=55433` и порт
+в `DATABASE_URL` на `55433`. Эти порты должны быть свободны. Файл исключён
+из Git правилом `.env.*`. Во всех командах ниже используются явные `-p`
+и `--env-file`, чтобы не затронуть обычный проект `task-job`.
+
+```powershell
+docker compose -p task-job-clean --env-file .env.clean-check build --no-cache api alpha beta db-bootstrap migrate seed tests
+docker compose -p task-job-clean --env-file .env.clean-check up -d --wait
+docker compose -p task-job-clean --env-file .env.clean-check ps -a
+docker compose -p task-job-clean --env-file .env.clean-check --profile tools run --rm --no-deps seed
+docker compose -p task-job-clean --env-file .env.clean-check --profile tools run --rm --no-deps seed
+docker compose -p task-job-clean --env-file .env.clean-check run --rm --no-deps migrate alembic current
+docker compose -p task-job-clean --env-file .env.clean-check run --rm --no-deps migrate alembic check
+docker compose -p task-job-clean --env-file .env.clean-check --profile test run --rm --no-deps tests
+Invoke-RestMethod http://localhost:18000/health/ready
+```
+
+Ожидается: четыре основных сервиса healthy, `db-bootstrap` и `migrate`
+завершились с кодом 0, версия БД `0002 (head)`, расхождений схемы нет,
+все 350 тестов проходят без пропусков. Двойной seed оставляет начальные
+балансы 100 и 50, по одному начислению на пользователя.
+
+Выполните примеры генерации и подписанной оплаты из README для этого проекта:
+замените `$baseUrl` на `http://localhost:18000`, а в команде оплаты используйте
+`docker compose -p task-job-clean --env-file .env.clean-check exec -T api python -`.
+Генерация должна завершиться с балансом 98. Доставка оплаты на 10 токенов дважды
+даёт `applied=true`, затем `applied=false`, итоговый баланс 108.
+
+Затем проверьте сохранность состояния:
+
+```powershell
+docker compose -p task-job-clean --env-file .env.clean-check down
+docker compose -p task-job-clean --env-file .env.clean-check up -d --wait
+```
+
+Та же задача должна остаться `completed` с прежним результатом, баланс — 108.
+После проверки удалите только созданное проверочное окружение:
+
+```powershell
+docker compose -p task-job-clean --env-file .env.clean-check down --volumes
+Remove-Item -LiteralPath .env.clean-check
+```
+
+24 октября 2026 года этот путь проверен с новым томом и сборкой без кеша:
+350 тестов прошли, seed идемпотентен, генерация и подписанная оплата работают,
+данные пережили пересоздание контейнеров. Также проверены генерация пустой
+ревизии Alembic во временной копии migrations, её применение и откат к 0002.
+Обычный проект и его данные сохранены; проверочные Docker-контейнеры,
+сеть и том удалены.

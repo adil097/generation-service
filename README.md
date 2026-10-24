@@ -1,11 +1,13 @@
 # Сервис генерации
 
-Реализация [тестового задания](TASK.md) по [плану](PLAN.md)
-и [архитектуре](docs/architecture.md). Готовы этапы 1–10: каркас, Docker Compose,
-схема БД, финансовые операции, создание задачи, общий механизм завершения попытки,
-фейковые провайдеры, отправка задач, фоновые процессы и все HTTP-методы API.
-Конкурентность и восстановление проверены на PostgreSQL, включая
-принудительное завершение процессов до и после COMMIT.
+Асинхронный сервис по [тестовому заданию](TASK.md): принимает заказ на генерацию,
+списывает токены, перебирает подходящих провайдеров при отказе и возвращает
+токены при окончательной ошибке. Стек: Python 3.12, FastAPI, PostgreSQL 17,
+SQLAlchemy/asyncpg, Alembic и HTTPX. API работает в четырёх процессах Uvicorn.
+Регистрация, авторизация, настоящие деньги и хранилище файлов в задание не входят.
+
+Решения описаны в [архитектуре](docs/architecture.md), выполненные этапы —
+в [плане](PLAN.md), сценарии тестирования — в [матрице проверок](docs/testing.md).
 
 Используется Python 3.12. Зависимости описаны в `pyproject.toml`, точные
 версии и хеши зафиксированы в `uv.lock`. Для управления окружением используется
@@ -13,16 +15,22 @@
 
 ## Запуск через Docker
 
-Достаточно Docker с Compose; локальные Python и uv не требуются.
+Достаточно Docker с Compose и Linux-контейнерами; локальные Python и uv
+не требуются. Примеры команд приведены для PowerShell.
 Из каталога проекта выполните:
 
 ```powershell
 docker compose up --build -d --wait
 docker compose ps
+docker compose --profile tools run --rm --build seed
+Invoke-RestMethod http://localhost:8000/health/ready
 ```
 
 Без `.env` используются значения для локальной разработки из `compose.yaml`.
 Для изменения портов и настроек скопируйте `.env.example` в `.env`.
+Команда `seed` добавляет двух демонстрационных пользователей; без неё
+пользователей в новой БД нет. Пример полного запроса с ожиданием результата —
+в разделе [HTTP API](#http-api).
 
 Сначала запускается PostgreSQL 17, затем одноразовые задания `db-bootstrap`
 и `migrate` создают роли и применяют миграции. После их успешного завершения
@@ -59,6 +67,37 @@ docker compose ps
 docker compose logs api alpha beta
 docker compose down
 ```
+
+Повторный `docker compose up -d --wait` использует прежний том с данными.
+Проверка чистого запуска выполняется с отдельным Compose-проектом и новым
+томом, как описано в [docs/testing.md](docs/testing.md#проверка-чистого-запуска).
+
+## Настройки
+
+Пример всех переменных находится в [.env.example](.env.example).
+`.env` исключён из Git и из контекста Docker-сборки; реальные секреты
+передаются через окружение. Значения `local-*` предназначены для локального
+запуска. Параметры фейковых провайдеров описаны в отдельном разделе ниже.
+
+| Переменная | По умолчанию в Compose | Назначение |
+| --- | --- | --- |
+| `API_PORT`, `POSTGRES_PORT` | `8000`, `55432` | Порты на хосте, привязанные к 127.0.0.1 |
+| `POSTGRES_DB`, `POSTGRES_USER` | `generation`, `generation` | Имя БД и административная роль |
+| `POSTGRES_PASSWORD` | `local-development` | Пароль административной роли, только для начальной настройки и тестов |
+| `MIGRATION_DATABASE_PASSWORD` | `local-migration-password` | Пароль роли миграций |
+| `APP_DATABASE_PASSWORD` | `local-app-password` | Пароль роли основного API |
+| `PROVIDER_DATABASE_PASSWORD` | `local-provider-password` | Пароль роли фейковых провайдеров |
+| `ALPHA_WEBHOOK_SECRET`, `BETA_WEBHOOK_SECRET` | `local-alpha-secret`, `local-beta-secret` | Отдельные HMAC-секреты провайдеров |
+| `PAYMENTS_WEBHOOK_SECRET` | `local-payments-secret` | HMAC-секрет оплаты |
+| `CALLBACK_BASE_URL` | `http://api:8000` | Адрес API, доступный обоим провайдерам |
+| `HTTP_TIMEOUT`, `DISPATCH_LEASE`, `PROVIDER_TIMEOUT` | `5`, `15`, `60` | Общий срок HTTP-вызова, срок токена отправки и дедлайн попытки, в секундах |
+| `POLL_INTERVAL` | `1` | Интервал фонового поиска работы и повторов после ошибки |
+
+Требуется `HTTP_TIMEOUT < DISPATCH_LEASE < PROVIDER_TIMEOUT`.
+Compose сам задаёт внутренние адреса БД и провайдеров: `db:5432`,
+`http://alpha:8000`, `http://beta:8000`. Переменные `DATABASE_URL`, `ALPHA_URL`
+и `BETA_URL` из `.env.example` предназначены для прямого запуска Python;
+они не заменяют соответствующие адреса, явно заданные в `compose.yaml`.
 
 ## Миграции и роли БД
 
@@ -129,7 +168,8 @@ docker compose --profile test run --rm --build tests
 ```
 
 Тестовый образ включает зависимости разработки. Команда запускает PostgreSQL
-и выполняет тесты конфигурации, HTTP-проверок и готовности с настоящей БД.
+и выполняет весь набор: 350 тестов конфигурации, схемы, ролей, финансовых
+операций, API, конкурентности и восстановления с настоящей БД.
 Тесты схемы создают отдельные базы `test_schema_<uuid>`, применяют миграции,
 проверяют ограничения, права и начальные данные, а затем удаляют эти базы.
 Рабочая БД не очищается. Административные реквизиты передаются только
@@ -289,7 +329,7 @@ HTTP-адаптер проверяет подпись HMAC до вызова о�
 Первое допустимое завершение, зафиксированное под блокировками, окончательно.
 Поздний корректный `completed` или `failed` закрытой попытки даёт `ignored`:
 он не меняет результат, историю или журнал, даже если новая попытка ещё активна.
-HTTP-адаптер должен подтвердить такое корректное событие ответом 2xx.
+HTTP-адаптер подтверждает такое корректное событие ответом 200.
 Если дедлайн уже наступил, но сторож ещё не зафиксировал таймаут, успех
 активной попытки принимается. Принятый успех исключает последующий возврат.
 Так пользователь не получает одновременно результат и возвращённые токены;
@@ -475,10 +515,22 @@ UUID задаётся канонической строкой. Все пять �
 Пример для PowerShell после запуска `seed`:
 
 ```powershell
-$created = Invoke-RestMethod -Method Post -Uri http://localhost:8000/generate -ContentType application/json -Body '{"user_id":1,"model_slug":"image-fast","prompt":"Draw the sea","ref_images":[]}'
-Invoke-RestMethod -Uri "http://localhost:8000/tasks/$($created.task_id)"
-Invoke-RestMethod -Uri http://localhost:8000/users/1/balance
+$baseUrl = 'http://localhost:8000'
+$created = Invoke-RestMethod -Method Post -Uri "$baseUrl/generate" -ContentType application/json -Body '{"user_id":1,"model_slug":"image-fast","prompt":"Draw the sea","ref_images":[]}'
+$deadline = (Get-Date).AddSeconds(60)
+do {
+    Start-Sleep -Seconds 1
+    $task = Invoke-RestMethod -Uri "$baseUrl/tasks/$($created.task_id)"
+} while ($task.status -in @('queued', 'processing') -and (Get-Date) -lt $deadline)
+$task | ConvertTo-Json -Depth 6
+Invoke-RestMethod -Uri "$baseUrl/users/1/balance"
 ```
+
+На пустой БД после `seed` и при настройках по умолчанию задача становится
+`completed`, содержит строку-ссылку `result_url`, а баланс пользователя 1 — 98.
+Обычный результат готов через 2–20 секунд. Если после ожидания задача ещё активна,
+проверьте `docker compose logs api alpha beta`. При другом `API_PORT` замените
+порт в `$baseUrl`. Повтор `POST /generate` создаёт новую задачу и списание.
 
 `ref_images` можно опустить; тогда используется пустой список. `user_id` —
 целое в диапазоне PostgreSQL BIGINT. Строки вместо чисел, дробные значения,
@@ -567,31 +619,24 @@ print(urllib.request.urlopen(request).read().decode("utf-8"))
 
 ## Локальная разработка
 
-Скопируйте `.env.example` в `.env` и настройте адрес PostgreSQL и секреты.
-`.env` исключён из Git. Примеры секретов предназначены для локального запуска.
+Для редактора и быстрых тестов можно создать окружение на хосте с uv 0.13.5.
+Проект требует Python 3.12; команда явно выбирает эту версию, включая случай,
+когда в Windows установлен Python 3.13:
 
 ```powershell
-Copy-Item .env.example .env
-uv sync --locked
-uv run --locked uvicorn generation_service.main:app --host 0.0.0.0 --port 8000 --workers 4
-```
-
-Проверка процесса: `GET http://localhost:8000/health/live`.
-OpenAPI: `http://localhost:8000/docs`.
-
-Для локального приложения сначала выполните `docker compose up -d migrate`.
-Если локально запускаются и провайдеры, замените `ALPHA_URL` и `BETA_URL`
-на их адреса на хосте. Обычный локальный запуск API использует ту же БД,
-что контейнеры, и требует свободного порта 8000.
-
-```powershell
+uv sync --locked --python 3.12
 uv run --locked pytest
 ```
 
-Настройки читаются из окружения и `.env`; окружение имеет приоритет.
-`DATABASE_URL` должен использовать драйвер `postgresql+asyncpg`.
-Секреты обязательны. Интервалы задаются в секундах и проверяются при запуске:
-`HTTP_TIMEOUT < DISPATCH_LEASE < PROVIDER_TIMEOUT`.
+Без `TEST_*_DATABASE_URL` проверки с БД будут пропущены. Полный набор, включая
+права ролей и отдельные процессы, запускайте через тестовый сервис Compose.
+Для изменения зависимостей обновите `pyproject.toml`, выполните `uv lock`,
+проверьте изменения `uv.lock` и повторите полный набор.
 
-Для обновления зависимостей после изменения `pyproject.toml` выполните
-`uv lock`, проверьте изменения `uv.lock` и повторите тесты.
+Для запуска всего сервиса используйте Compose. При ручном запуске Python
+потребуется отдельно подготовить PostgreSQL командами `db-bootstrap` и `migrate`,
+запустить обоих провайдеров и задать доступные им адреса. Настройки читаются
+из окружения и `.env`, окружение имеет приоритет; `DATABASE_URL` должен
+использовать драйвер `postgresql+asyncpg`. Docker-имена `alpha` и `beta`
+не разрешаются на Windows-хосте, а их порты по умолчанию не опубликованы.
+Одного запуска Uvicorn на хосте для полного цикла недостаточно.
