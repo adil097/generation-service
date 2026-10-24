@@ -98,3 +98,45 @@ def crash_after_accept(urls, settings_values, attempt_id, pipe):
         os._exit(1)
 
     asyncio.run(run())
+
+
+def crash_at_dispatch_commit(urls, settings_values, attempt_id, checkpoint, pipe):
+    """Exit without cleanup after a durable lease or accepted-response commit."""
+
+    async def run():
+        import json
+        from uuid import UUID
+
+        engine = create_async_engine(urls["app"])
+        dispatch = DispatchService(
+            TransactionRunner(async_sessionmaker(engine)),
+            Settings(_env_file=None, **settings_values),
+        )
+        claim = await dispatch.claim(UUID(attempt_id))
+        assert claim is not None
+        if checkpoint == "accepted":
+            provider_engine = create_async_engine(urls["provider"])
+            provider = ProviderService(
+                TransactionRunner(async_sessionmaker(provider_engine)),
+                ProviderSettings(
+                    _env_file=None,
+                    database_url=urls["provider"],
+                    provider_name=claim.provider_name,
+                    provider_webhook_secret="test-secret",
+                ),
+            )
+
+            async def receive(request):
+                accepted = await provider.accept(json.loads(request.content))
+                return httpx.Response(202, json={"external_id": accepted.external_id})
+
+            async with httpx.AsyncClient(
+                transport=httpx.MockTransport(receive)
+            ) as client:
+                assert await dispatch.send(claim, client) == "accepted"
+        else:
+            assert checkpoint == "claim"
+        pipe.send(os.getpid())
+        os._exit(73)
+
+    asyncio.run(run())

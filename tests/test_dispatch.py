@@ -30,7 +30,11 @@ from generation_service.services.errors import InvalidAttemptEvent
 from generation_service.services.finance import FinancialService, PaymentEvent
 from generation_service.services.generation import GenerationRequest, GenerationService
 from tests.db_support import alembic
-from tests.dispatch_worker import crash_after_accept, run_batch
+from tests.dispatch_worker import (
+    crash_after_accept,
+    crash_at_dispatch_commit,
+    run_batch,
+)
 
 
 @pytest.fixture(scope="module")
@@ -609,6 +613,68 @@ async def test_process_crash_after_provider_commit_recovers_one_external_generat
             == 1
         )
     await assert_finances(context, item)
+
+
+@pytest.mark.parametrize("checkpoint", ["claim", "accepted", "repeated_claim"])
+async def test_abrupt_exit_at_dispatch_commits_preserves_deadline_and_work(
+    context, checkpoint
+):
+    item = await create(context, refs=5)
+    process_context = multiprocessing.get_context("spawn")
+    original = None
+    for _ in range(3 if checkpoint == "repeated_claim" else 1):
+        parent, child = process_context.Pipe(duplex=False)
+        process = process_context.Process(
+            target=crash_at_dispatch_commit,
+            args=(
+                context.urls,
+                settings_dict(context),
+                str(item.attempt_id),
+                "accepted" if checkpoint == "accepted" else "claim",
+                child,
+            ),
+        )
+        process.start()
+        child.close()
+        try:
+            assert await asyncio.to_thread(parent.poll, 20)
+            assert parent.recv() == process.pid
+            await asyncio.to_thread(process.join, 10)
+            assert process.exitcode == 73
+        finally:
+            if process.is_alive():
+                process.kill()
+                await asyncio.to_thread(process.join, 10)
+            parent.close()
+        saved = await attempt(context, item.attempt_id)
+        assert saved["status"] == (
+            "awaiting_result" if checkpoint == "accepted" else "pending"
+        )
+        if original is None:
+            original = saved
+        else:
+            for field in ("sent_at", "deadline_at", "request_payload", "id"):
+                assert saved[field] == original[field]
+        if checkpoint != "accepted":
+            await expire_lease(context, item.attempt_id)
+
+    if checkpoint != "repeated_claim":
+        assert await four_processes(context) == (0 if checkpoint == "accepted" else 1)
+        recovered = await attempt(context, item.attempt_id)
+        assert recovered["status"] == "awaiting_result"
+        assert recovered["deadline_at"] == original["deadline_at"]
+        async with context.admin.connect() as connection:
+            assert (
+                await connection.scalar(
+                    sa.select(sa.func.count()).select_from(ProviderTask)
+                )
+                == 1
+            )
+    await expire_deadline(context, item.attempt_id)
+    assert await four_processes(context, watchdog=True) == 0
+    assert (await attempt(context, item.attempt_id))["status"] == "timed_out"
+    assert len(await history(context, item.task_id)) == 1
+    await assert_finances(context, item, refunded=True)
 
 
 async def test_timeout_after_provider_acceptance_falls_back_and_ignores_late_result(
